@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 from torch.optim.lr_scheduler import StepLR
 import numpy as np
-import task_generator_test1 as tg
+import task_generator_test as tg
 import os
 import math
 import argparse
@@ -23,10 +23,10 @@ parser = argparse.ArgumentParser(description="One Shot Visual Recognition")
 parser.add_argument("-f","--feature_dim",type = int, default = 64)
 parser.add_argument("-r","--relation_dim",type = int, default = 8)
 parser.add_argument("-w","--class_num",type = int, default = 3)
-parser.add_argument("-s","--sample_num_per_class",type = int, default = 5)
-parser.add_argument("-b","--batch_num_per_class",type = int, default = 20)
-parser.add_argument("-e","--episode",type = int, default= 10)
-parser.add_argument("-t","--test_episode", type = int, default = 250)
+parser.add_argument("-s","--sample_num_per_class",type = int, default = 20)
+parser.add_argument("-b","--batch_num_per_class",type = int, default = 3)
+parser.add_argument("-e","--episode",type = int, default= 30)
+parser.add_argument("-t","--test_episode", type = int, default = 500)
 parser.add_argument("-l","--learning_rate", type = float, default = 0.001)
 parser.add_argument("-g","--gpu",type=int, default=0)
 parser.add_argument("-u","--hidden_unit",type=int,default=10)
@@ -44,6 +44,7 @@ LEARNING_RATE = args.learning_rate
 GPU = args.gpu
 HIDDEN_UNIT = args.hidden_unit
 device = torch.device("cuda:"+str(GPU) if torch.cuda.is_available() else "cpu")
+
 
 def mean_confidence_interval(data, confidence=0.95):
     a = 1.0*np.array(data)
@@ -144,11 +145,13 @@ def main():
     relation_network_optim = torch.optim.Adam(relation_network.parameters(),lr=LEARNING_RATE)
     relation_network_scheduler = StepLR(relation_network_optim,step_size=100000,gamma=0.5)
 
-    if os.path.exists(str("./models/fiber_feature_encoder_" + str(4) +"way_" + str(5) +"shot.pt")):
-        feature_encoder.load_state_dict(torch.load(str("./models/fiber_feature_encoder_" + str(4) +"way_" + str(5) +"shot.pt"), map_location=device))
+    model_way = 4
+    model_shot = 5
+    if os.path.exists(str("./models/fiber_feature_encoder_" + str(model_way) +"way_" + str(model_shot) +"shot.pt")):
+        feature_encoder.load_state_dict(torch.load(str("./models/fiber_feature_encoder_" + str(model_way) +"way_" + str(model_shot) +"shot.pt"), map_location=device))
         print("load feature encoder success")
-    if os.path.exists(str("./models/fiber_relation_network_"+ str(4) +"way_" + str(5) +"shot.pt")):
-        relation_network.load_state_dict(torch.load(str("./models/fiber_relation_network_"+ str(4) +"way_" + str(5) +"shot.pt"), map_location=device))
+    if os.path.exists(str("./models/fiber_relation_network_"+ str(model_way) +"way_" + str(model_shot) +"shot.pt")):
+        relation_network.load_state_dict(torch.load(str("./models/fiber_relation_network_"+ str(model_way) +"way_" + str(model_shot) +"shot.pt"), map_location=device))
         print("load relation network success")
 
     # feature_encoder.eval()
@@ -162,39 +165,68 @@ def main():
             print("Testing...")
 
             accuracies = []
-            for episode in range(TEST_EPISODE):
+            for i in range(TEST_EPISODE):
                 torch.cuda.empty_cache()
                 total_rewards = 0
-                
-                task = tg.FiberTask(metatest_folders,CLASS_NUM,SAMPLE_NUM_PER_CLASS,BATCH_NUM_PER_CLASS, BATCH_NUM_PER_CLASS*episode)
+
+                task = tg.FiberTask(metatest_folders,CLASS_NUM,SAMPLE_NUM_PER_CLASS,BATCH_NUM_PER_CLASS)
                 sample_dataloader = tg.get_fiber_data_loader(task,num_per_class=SAMPLE_NUM_PER_CLASS,split="train",shuffle=False)
                 test_dataloader = tg.get_fiber_data_loader(task,num_per_class=BATCH_NUM_PER_CLASS,split="test",shuffle=False)
 
                 sample_images,sample_labels = sample_dataloader.__iter__().next()
-
+                
                 for test_images,test_labels in test_dataloader:
                     torch.cuda.empty_cache()
-
                     batch_size = test_labels.shape[0]
                     
                     with torch.no_grad():
                         # calculate features
-                        sample_features = feature_encoder(Variable(sample_images).to(device)) # 5x64
-                        sample_features = sample_features.view(CLASS_NUM,SAMPLE_NUM_PER_CLASS,FEATURE_DIM,54,54)
-                        sample_features = torch.sum(sample_features,1).squeeze(1)
-                        sample_features_ext = sample_features.unsqueeze(0).repeat(batch_size,1,1,1,1)
+                        sample_features = feature_encoder(Variable(sample_images).to(device)) # [20*3,64,54,54]
+                        
+                        # make relation pair each sample
+                        sample_features_ext = sample_features.unsqueeze(0).repeat(batch_size,1,1,1,1) # [10*3,20*3,64,54,54]
 
-                        test_features = feature_encoder(Variable(test_images).to(device)) # 20x64
-                        test_features_ext = test_features.unsqueeze(0).repeat(1*CLASS_NUM,1,1,1,1)
-                        test_features_ext = torch.transpose(test_features_ext,0,1)
+                        # sum up all the samples
+                        # sample_features = sample_features.view(CLASS_NUM,SAMPLE_NUM_PER_CLASS,FEATURE_DIM,54,54) # [3,20,64,54,54]
+                        # sample_features = torch.sum(sample_features,1).squeeze(1) # [3,64,54,54]
+                        #sample_features_ext = sample_features.unsqueeze(0).repeat(batch_size,1,1,1,1) # [30,3,64,54,54]
+
+                        test_features = feature_encoder(Variable(test_images).to(device)) # [10*3,64,54,54]
+                        test_features_ext = test_features.unsqueeze(0).repeat(SAMPLE_NUM_PER_CLASS*CLASS_NUM,1,1,1,1) # [20*3,10*3,64,54,54]
+                        # test_features_ext = test_features.unsqueeze(0).repeat(1*CLASS_NUM,1,1,1,1) # [3,30,64,54,54]
+                        test_features_ext = torch.transpose(test_features_ext,0,1) # [10*3,20*3,64,54,54]
 
                         # calculate relations
-                        relation_pairs = torch.cat((sample_features_ext,test_features_ext),2).view(-1,FEATURE_DIM*2,54,54)
-                        relations = relation_network(relation_pairs).view(-1,CLASS_NUM)
+                        relation_pairs = torch.cat((sample_features_ext,test_features_ext),2).view(-1,FEATURE_DIM*2,54,54) # [30*60,128,54,54]
+                        relations = relation_network(relation_pairs).view(-1,CLASS_NUM*SAMPLE_NUM_PER_CLASS) # [30,60]
+                        # print(relations.data)
 
-                        _,predict_labels = torch.max(relations.data,1)
+                        # predict the labels
+                        # _,predict_labels = torch.max(relations.data,1) # the max value as predict label
+                        top_num = 20
+                        _,relation_score = torch.topk(relations.data, top_num, dim=1, largest=True) # return top 20 values
+                        relation_score = relation_score/SAMPLE_NUM_PER_CLASS
+                        # print("relation score : ", relation_score)
+                        
+                        # count the number of each class
+                        predict_labels = torch.zeros(CLASS_NUM*BATCH_NUM_PER_CLASS)
+                        for n in range(CLASS_NUM*BATCH_NUM_PER_CLASS):
+                            predict = torch.zeros(CLASS_NUM,1)
+                            for k in range(top_num):
+                                if relation_score[n][k] == 0:
+                                    predict[0] += 1
+                                elif relation_score[n][k] == 1:
+                                    predict[1] += 1
+                                else:
+                                    predict[2] += 1
+                            _,predict_label = torch.max(predict.data,0)
+                            predict_labels[n] = predict_label
+
                         predict_labels = predict_labels.to(device,dtype=torch.int32)
                         test_labels = test_labels.to(device,dtype=torch.int32)
+                        
+                        # print("predict labels: ", predict_labels)
+                        # print("test labels:    ", test_labels)
 
                     rewards = [1 if predict_labels[j]==test_labels[j] else 0 for j in range(batch_size)]
 
